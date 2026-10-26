@@ -25,7 +25,6 @@ env:
   RUSTUP_TOOLCHAIN: 1.98.1
   PYTHONDONTWRITEBYTECODE: "1"
   NO_PROXY: "127.0.0.1,localhost"
-  no_proxy: "127.0.0.1,localhost"
 
 jobs:
   check:
