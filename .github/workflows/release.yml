@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable source and release version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the existing tag to match Cargo.toml and checked-out source
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -B scripts/package-release.py version --tag "$RELEASE_TAG")
+          commit=$(git rev-parse HEAD)
+          test "$commit" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          printf 'tag=%s\nversion=%s\ncommit=%s\n' "$RELEASE_TAG" "$version" "$commit" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Test and build every native release target
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    with:
+      release-tag: ${{ needs.validate.outputs.tag }}
+
+  publish:
+    name: Stage, verify and publish the complete release
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      SOURCE_COMMIT: ${{ needs.validate.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify the complete asset set and create SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          python3 -B scripts/package-release.py checksums --tag "$RELEASE_TAG" --directory dist
+          (cd dist && sha256sum --check SHA256SUMS)
+      - name: Create or resume an unpublished draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft,tagName,targetCommitish > "$RUNNER_TEMP/release.json"; then
+            python3 -c 'import json, os; release=json.load(open(os.environ["RUNNER_TEMP"] + "/release.json")); assert release["isDraft"] is True, "Existing published releases are never overwritten"; assert release["tagName"] == os.environ["RELEASE_TAG"]; assert release["targetCommitish"] == os.environ["SOURCE_COMMIT"], "Draft source commit differs"'
+          else
+            cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Yike CLI $RELEASE_VERSION
+
+          All five native targets passed formatting, Clippy, anonymous Rust tests, release builds, packaging regressions and an offline doctor smoke check.
+
+          Each archive contains the executable, MIT license and a generic usage note. Linux GNU builds can be used in a compatible WSL distribution. Binaries are unsigned and macOS builds are not notarized.
+
+          Download the matching archive and SHA256SUMS, then verify its SHA-256 before extraction. Source commit: $SOURCE_COMMIT.
+          EOF
+            gh release create "$RELEASE_TAG" --draft --verify-tag --target "$SOURCE_COMMIT" --title "Yike CLI $RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+      - name: Upload complete assets to the draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+      - name: Download staged assets and verify their checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > "$RUNNER_TEMP/remote-assets.txt"
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort > "$RUNNER_TEMP/local-assets.txt"
+          diff -u "$RUNNER_TEMP/local-assets.txt" "$RUNNER_TEMP/remote-assets.txt"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/staged-release"
+          cmp dist/SHA256SUMS "$RUNNER_TEMP/staged-release/SHA256SUMS"
+          (cd "$RUNNER_TEMP/staged-release" && sha256sum --check SHA256SUMS)
+      - name: Publish only the verified draft
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_COMMIT"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
+          gh release edit "$RELEASE_TAG" --draft=false --verify-tag

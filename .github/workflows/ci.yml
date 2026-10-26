@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Existing release tag; empty for checks without artifact upload
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.98.1
+  PYTHONDONTWRITEBYTECODE: "1"
+  NO_PROXY: "127.0.0.1,localhost"
+  no_proxy: "127.0.0.1,localhost"
+
+jobs:
+  check:
+    name: Native ${{ matrix.target }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: yike.exe
+            python: python
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: yike
+            python: python3
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: yike
+            python: python3
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            binary: yike
+            python: python3
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: yike
+            python: python3
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      TARGET: ${{ matrix.target }}
+      PYTHON: ${{ matrix.python }}
+      BINARY: target/${{ matrix.target }}/release/${{ matrix.binary }}
+      RELEASE_TAG: ${{ inputs.release-tag || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned native Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt --component clippy --target "$TARGET"
+      - name: Confirm native target and Python runtime
+        run: |
+          rustc -vV
+          "$PYTHON" --version
+          "$PYTHON" -c 'import os, subprocess, sys; assert sys.version_info >= (3, 11); assert "host: " + os.environ["TARGET"] in subprocess.check_output(["rustc", "-vV"], text=True)'
+      - name: Confirm hosted Windows C++ linker and SDK installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'MSVC C++ build tools are missing' }
+          $linker = Get-ChildItem "$installation\VC\Tools\MSVC\*\bin\Hostx64\x64\link.exe" | Select-Object -First 1
+          if (-not $linker) { throw 'Native x64 MSVC link.exe is missing' }
+          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Lib\*\um\x64\kernel32.lib" | Select-Object -First 1
+          if (-not $sdk) { throw 'Native x64 Windows SDK libraries are missing' }
+          Write-Output $linker.FullName
+          Write-Output $sdk.FullName
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --locked --all-targets --target "$TARGET" -- -D warnings
+      - name: Anonymous tests
+        run: cargo test --locked --all-targets --target "$TARGET"
+      - name: Packaging and optional POSIX launcher regressions
+        run: '"$PYTHON" -B -m unittest discover -s tests -p "test_*.py"'
+      - name: Locked release build
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Executable version, help and anonymous offline doctor
+        run: '"$PYTHON" -B scripts/package-release.py smoke --binary "$BINARY"'
+      - name: Package the tagged binary
+        if: inputs.release-tag != ''
+        run: '"$PYTHON" -B scripts/package-release.py package --tag "$RELEASE_TAG" --target "$TARGET" --binary "$BINARY"'
+      - name: Retain release handoff archive briefly
+        if: inputs.release-tag != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+          include-hidden-files: false
