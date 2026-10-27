@@ -16,6 +16,16 @@ import time
 import uuid
 
 
+def positive_integer(value):
+    try:
+        number = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer within u64 (1 to 18446744073709551615)") from error
+    if not 1 <= number <= 18446744073709551615:
+        raise argparse.ArgumentTypeError("must be a positive integer within u64 (1 to 18446744073709551615)")
+    return number
+
+
 def runner_lock(directory):
     """OS releases this lock after a crash; two launchers cannot share a run."""
     lock = (directory / "runner.lock").open("a+b")
@@ -66,6 +76,7 @@ def run():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--album", required=True)
     parser.add_argument("--expect-files", type=int, required=True)
+    parser.add_argument("--attempt-upload-limit", type=positive_integer, metavar="BYTES", help="Explicit attempt ceiling forwarded only when creating a new upload plan")
     parser.add_argument("--require-verified-job", help="Do not start upload until this rehearsal job is fully SHA-256 verified")
     parser.add_argument("--run-id", default=str(uuid.uuid4()))
     arguments = parser.parse_args()
@@ -84,9 +95,11 @@ def run():
     child_options = {"pass_fds": (lock.fileno(),)}
     status_path = directory / "status.json"
     configuration = {"root": str(arguments.root.resolve()), "album": arguments.album, "expected_files": arguments.expect_files, "require_verified_job": arguments.require_verified_job}
+    if arguments.attempt_upload_limit is not None:
+        configuration["attempt_upload_limit"] = arguments.attempt_upload_limit
     status = json.loads(status_path.read_text()) if status_path.exists() else {"run_id": run_id, "created_at": now(), "configuration": configuration}
     if status.get("configuration") != configuration:
-        raise ValueError("run configuration differs; use a new run-id for a different source or album")
+        raise ValueError("run configuration differs; use a new run-id for different backup settings")
     if status.get("state") in ("completed", "partial"):
         return 0 if status["state"] == "completed" else 3
     log_path = directory / "progress.log"
@@ -98,7 +111,10 @@ def run():
             result_path = directory / "plan.json"
             with result_path.open("wb") as result:
                 os.chmod(result_path, 0o600)
-                process = subprocess.Popen(command + ["upload", "plan", configuration["root"], "--album", arguments.album, "--expect-files", str(arguments.expect_files)], stdout=result, stderr=log, **child_options)
+                plan_arguments = ["upload", "plan", configuration["root"], "--album", arguments.album, "--expect-files", str(arguments.expect_files)]
+                if arguments.attempt_upload_limit is not None:
+                    plan_arguments += ["--attempt-upload-limit", str(arguments.attempt_upload_limit)]
+                process = subprocess.Popen(command + plan_arguments, stdout=result, stderr=log, **child_options)
                 status["child_pid"] = process.pid
                 write_status(status_path, status)
                 code = process.wait()

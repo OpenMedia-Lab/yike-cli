@@ -119,4 +119,6 @@ python3 scripts/run-backup.py --cli /absolute/path/yike --state-dir /native/priv
 yike completions zsh > _yike
 ```
 
+后台启动器也接受 `--attempt-upload-limit BYTES`，随 run 配置保存并仅传给新计划；改变上限需要新的 run-id。可用 `--require-verified-job JOB_ID` 要求前一个样本任务全部强校验完成后才开始上传。
+
 开发和测试见 [贡献指南](CONTRIBUTING.md)，协议边界见 [协议记录](docs/protocol.md)。许可证：MIT。
