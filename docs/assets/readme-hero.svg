@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="560" viewBox="0 0 1280 560" role="img" aria-labelledby="title desc">
+  <title id="title">Yike CLI — original media, resumable transfers, verified bytes</title>
+  <desc id="desc">An original workflow illustration: a local video passes through a resumable transfer into a cloud original, then a full original-stream SHA-256 comparison verifies the backup.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#e4e6e0" stroke-width="1"/></pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#305de6" stroke-width="1.5" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1280" height="560" rx="24" fill="#f6f6f1"/>
+  <rect x="688" y="40" width="552" height="480" rx="20" fill="url(#grid)"/>
+  <g fill="#1d272b" font-family="Arial, Helvetica, sans-serif">
+    <text x="56" y="76" font-size="17" letter-spacing="2.4">OPENMEDIA LAB / YIKE CLI</text>
+    <text x="56" y="190" font-size="72" font-weight="700" letter-spacing="-2">Keep every</text>
+    <text x="56" y="270" font-size="72" font-weight="700" letter-spacing="-2">original byte.</text>
+    <text x="58" y="324" font-size="23" fill="#65737a">Plan. Transfer. Read back. Verify.</text>
+    <text x="58" y="361" font-size="20" fill="#65737a">A resumable CLI for Baidu Photo originals.</text>
+  </g>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="58" y="422" width="140" height="40" rx="20" fill="#e3e9fb"/>
+    <text x="128" y="448" text-anchor="middle" fill="#305de6" font-size="16" font-weight="700">RUST CLI</text>
+    <text x="218" y="447" fill="#65737a" font-size="17">Original MP4 · persistent jobs</text>
+  </g>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <rect x="724" y="106" width="482" height="348" rx="18" fill="#fff" stroke="#cbd2d2" stroke-width="1.5"/>
+    <text x="750" y="143" fill="#65737a" font-size="15" letter-spacing="1.8">ORIGINAL-MEDIA WORKFLOW</text>
+    <path d="M750 162H1180" stroke="#e2e6e6"/>
+    <g stroke="#1d272b" stroke-width="2" fill="none">
+      <path d="M770 204H826L850 228V294H770Z" fill="#f6f6f1"/>
+      <path d="M826 204V228H850"/>
+      <path d="M798 240L818 251L798 262Z" fill="#305de6" stroke="#305de6"/>
+      <path d="M1062 230C1062 215 1075 205 1090 209C1097 191 1125 191 1134 209C1154 205 1168 218 1168 234C1189 237 1192 269 1170 275H1065C1044 270 1044 235 1062 230Z" fill="#e3e9fb" stroke="#305de6"/>
+    </g>
+    <path d="M878 246H1017" fill="none" stroke="#305de6" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <g fill="#305de6"><rect x="888" y="229" width="16" height="5" rx="2.5"/><rect x="910" y="229" width="16" height="5" rx="2.5"/><rect x="932" y="229" width="16" height="5" rx="2.5"/><rect x="954" y="229" width="16" height="5" rx="2.5"/></g>
+    <text x="810" y="323" text-anchor="middle" fill="#1d272b" font-size="18">Local original</text>
+    <text x="1110" y="323" text-anchor="middle" fill="#1d272b" font-size="18">Cloud original</text>
+    <path d="M1110 342V367H810V342" fill="none" stroke="#a8b5ba" stroke-width="1.5"/>
+    <rect x="824" y="350" width="273" height="36" rx="18" fill="#fff"/>
+    <text x="960" y="374" text-anchor="middle" fill="#65737a" font-size="15">Full original stream · SHA-256</text>
+    <rect x="851" y="401" width="220" height="34" rx="17" fill="#e3e9fb"/>
+    <path d="M875 417L881 423L891 411" fill="none" stroke="#305de6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="974" y="423" text-anchor="middle" fill="#305de6" font-size="16" font-weight="700">Match → verified</text>
+  </g>
+  <path d="M58 502H642" stroke="#cbd2d2"/>
+  <text x="58" y="528" font-family="Arial, Helvetica, sans-serif" fill="#65737a" font-size="13" letter-spacing="1.2">A RECEIPT IS A STAGE. THE BYTES ARE THE PROOF.</text>
+</svg>

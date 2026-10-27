@@ -1,22 +1,35 @@
-# Yike CLI · 一刻原件备份
+<p align="center">
+  <img src="docs/assets/readme-hero.svg" alt="Yike CLI: local originals, resumable transfer, original-stream hash verification" width="100%" />
+</p>
 
-A Rust CLI for resumable original-media transfers to your own Baidu Photo (一刻相册) account.
+<h1 align="center">Yike CLI</h1>
+<p align="center"><strong>Original media. Resumable transfers. Verified bytes.</strong></p>
+<p align="center">A Rust CLI for your own Baidu Photo (一刻相册) library.</p>
+<p align="center">
+  <a href="README_ZH.md">中文</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="https://github.com/OpenMedia-Lab/yike-cli/releases/latest">Download</a> ·
+  <a href="docs/usage.md">Command guide · 中文</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-用于本人一刻相册的原片上传、检索、原件下载与强校验。任务状态持久化，支持中断恢复与重复提交防护。使用网页私有接口，非官方客户端；协议变化集中在适配层维护。
+Upload your original MP4 files, resume interrupted jobs, and retrieve cloud originals.
+A backup becomes **verified** only after the cloud's complete original stream matches
+the immutable local SHA-256. An upload receipt alone is a different state.
 
-## 下载与运行
+- **Keep the originals:** no transcoding, splitting or source deletion.
+- **Pick up where you stopped:** durable plans and jobs; resume from server-reported missing parts.
+- **Know what completed:** separate uploaded, blocked and verified items; export a JSON report.
 
-从 [GitHub Releases](https://github.com/OpenMedia-Lab/yike-cli/releases) 下载对应系统的压缩包；解压后直接运行，不需要安装 Rust。每次发布提供 `SHA256SUMS` 用于核对下载文件。
+The hero illustrates the workflow; it is not a capture of an account or transfer.
 
-| 系统 | Rust target | 文件 |
-|---|---|---|
-| Windows x64 | `x86_64-pc-windows-msvc` | `.zip`，运行 `yike.exe` |
-| WSL / Linux x64 | `x86_64-unknown-linux-gnu` | `.tar.gz`，运行 `yike` |
-| Linux ARM64 | `aarch64-unknown-linux-gnu` | `.tar.gz` |
-| macOS Apple Silicon | `aarch64-apple-darwin` | `.tar.gz` |
-| macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
+## Quick start
 
-WSL 使用 Linux 版本。构建环境、系统要求和发布验证见 [发布说明](docs/releasing.md)。各平台产物由 CI 构建和测试，按需下载即可，本地不必保留全部产物。
+### 1. Download and check locally
+
+Get the archive for your system from [Releases](https://github.com/OpenMedia-Lab/yike-cli/releases/latest),
+check it against the accompanying `SHA256SUMS`, and extract it. Rust is not required
+to run a prebuilt binary.
 
 ```sh
 ./yike --version
@@ -24,101 +37,95 @@ WSL 使用 Linux 版本。构建环境、系统要求和发布验证见 [发布�
 ./yike --help
 ```
 
-PowerShell 中使用 `.\yike.exe`。也可从源码构建：
+The offline check does not sign in or contact Baidu. A fresh local state reports
+`session_saved: false` and `local_verified_receipts: 0`—expected before your first backup.
+It creates the CLI's local state directory.
+
+<details>
+<summary>Choose a platform or build from source</summary>
+
+| System | Archive target | Executable |
+| --- | --- | --- |
+| Windows x64 | `x86_64-pc-windows-msvc` · `.zip` | `.\yike.exe` in PowerShell |
+| Linux / WSL x64 | `x86_64-unknown-linux-gnu` · `.tar.gz` | `./yike` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` · `.tar.gz` | `./yike` |
+| macOS Apple Silicon | `aarch64-apple-darwin` · `.tar.gz` | `./yike` |
+| macOS Intel | `x86_64-apple-darwin` · `.tar.gz` | `./yike` |
+
+WSL uses the Linux build. For a source install, use the Rust toolchain described
+in the [build and release guide](docs/releasing.md):
 
 ```sh
-cargo build --locked --release
+git clone https://github.com/OpenMedia-Lab/yike-cli.git
+cd yike-cli
 cargo install --path . --locked
+yike doctor --offline
 ```
 
-Windows 源码构建需要 MSVC C++ 工具链；使用发布包不需要编译工具。SQLite 随程序构建，无需另装数据库。
+SQLite is bundled. Windows source builds require the MSVC C++ tools; release
+binaries do not. Platform compatibility, checksum commands and native build
+validation are documented in the [release guide](docs/releasing.md).
 
-## 登录
+</details>
+
+### 2. Sign in and browse
+
+Once `yike` is on your PATH (or use `./yike` beside the extracted binary):
 
 ```sh
 yike auth login
 yike auth status
-yike doctor
+yike albums list
+yike files search 'camera' --kind video
 ```
 
-在专用浏览器窗口正常扫码登录。WSL 通过本地 PowerShell 子进程连接 Windows Edge；macOS/Linux 使用专用浏览器配置。调试端口只监听回环地址，不扫描或解密日常浏览器配置。
+Scan the normal sign-in QR code in the dedicated browser window. macOS/Linux use
+a dedicated browser profile; WSL connects to Windows Edge. Credentials stay in the
+CLI's private local state. [Login and state-directory details →](docs/usage.md#登录)
 
-已有专用会话可用 `yike auth login --attach --port 19227`。密码和 Cookie 不需要放进命令行或聊天。
-
-会话和 SQLite 状态默认存入平台本地数据目录下的 `yike`，可通过 `--state-dir` 或 `YIKE_STATE_DIR` 指定专用私有目录。WSL 状态库须放原生 Linux 文件系统，素材可在挂载的 Windows 硬盘。原片、凭据、状态库、文件清单和报告不应提交到仓库或公开。
-
-## 上传：先计划，再执行
+### 3. Plan one original, then run it
 
 ```sh
-yike upload plan '/media/originals' --album 'Journey·Originals·{date}'
+yike upload plan '/media/originals/sample.mp4' --album 'Originals' --expect-files 1
+# Use the plan_id returned above:
 yike upload run PLAN_ID
-yike jobs status JOB_ID
-yike jobs resume JOB_ID
+# Use the job ID returned by the run:
 yike report JOB_ID --json > report.json
 ```
 
-计划阶段递归扫描 MP4（大小写不敏感），流式计算完整 MD5/SHA-256 和分片摘要，不创建云端对象。也可传入一个 MP4 路径，或用 `--max-files 1` 选择最小可传样本。`--expect-files N` 在哈希前确认库存，避免静默漏扫。
+Planning inventories and hashes the local file without creating cloud objects.
+`upload run` performs the transfer and, by default, streams the cloud original
+back to compare SHA-256 without saving a second complete local copy. That readback
+uses roughly one original's worth of download traffic.
 
-`{date}` 来自明确的日期目录，例如 `/media/originals/20000102/`；不依靠修改时间猜测拍摄日期。相册也可使用不带占位符的固定名称。
+Start with a small MP4. The default ceiling is **5 GiB per video**, or a smaller
+account-reported limit. Blocked or unresolved items keep a batch partially complete.
+The explicit large-file attempt option and its limits are in the
+[upload guide](docs/usage.md#上传先计划再执行).
 
-默认上传上限为 **5 GiB/视频**，若账号报告更小上限则取更小值。超限或不可确认的项保留在计划中并标为 blocked，不压缩或分割原片。存在 blocked、失败或未确认项时，整批仍是部分完成。
+## What do you want to do?
 
-无限容量与单文件上限是两项不同的能力。网页与账号配置可能报告 5 GiB，而服务端预创建仍接受更大的原片；预创建成功不能证明最终建档或原件读回成功。无限容量账号可在**新计划**中显式指定尝试上限（正整数，单位 bytes）：
+| Task | Start here |
+| --- | --- |
+| Resume an interrupted transfer | `yike jobs status JOB_ID` → `yike jobs resume JOB_ID` |
+| Recheck already uploaded originals | `yike verify JOB_ID` |
+| Find and download an original | `yike files search 'camera' --kind video` → `yike download plan --id FILE_ID --to '/chosen/output'` → `yike download run PLAN_ID` |
+| Back up a dated directory or run in the background | [Upload and launcher guide · 中文](docs/usage.md) |
+| Understand protocol and verification boundaries | [Protocol notes](docs/protocol.md) |
+| Build, test or package a release | [Contributing](CONTRIBUTING.md) · [Releasing](docs/releasing.md) |
 
-```sh
-# 6 GiB 尝试上限；先用一条原片验证完整上传与原件读回
-yike upload plan '/media/originals/sample.mp4' --album 'Originals' \
-  --attempt-upload-limit 6442450944 --expect-files 1
-yike upload run PLAN_ID
-```
+Downloads resume into a `.part` file, check the original's size and MD5, and publish
+the final file without overwriting an existing destination. Source-plan readback
+adds the original local SHA-256 comparison. [Download details · 中文 →](docs/usage.md#检索和原件下载)
 
-该值只表示愿意尝试的大小，不是服务保证。需要在线确认账号具有无限容量且报告了有效上传能力；执行时会重新检查。上限随不可变计划保存，旧计划不会自动放宽。超过 10 GiB 的原件读回也需实际验证，不能由较小样本推断。原片仍保留，只有完整读回 SHA-256 一致才算备份成功。
+## Fits your workflow
 
-每项原件在扫描和传输中核对大小、修改时间、原生文件身份与分片摘要；源变化要求重新计划。恢复时以服务器返回的缺失分片为准，不能只信本地进度。
+- **CLI and scripts:** JSON stdout, progress on stderr, persistent jobs and completion scripts.
+- **Personal archives:** keep original MP4 bytes and distinguish uploaded from verified.
+- **Interrupted sessions:** resume an existing job rather than start the batch again.
 
-默认上传后在执行电脑**流式读回云端原件，SHA-256 与不可变源计划完全一致**才记为 verified，不另存第二份整片。完整读回会产生约一份原片大小的下载流量。`uploaded` 表示已上传但尚未完成全部验证条件，与 `verified` 分开统计。
+This is an independently implemented, unofficial client using Baidu Photo's web
+contracts; service changes can require adapter updates. It does not delete cloud
+objects or local originals and does not provide mirror-delete synchronization.
 
-## 恢复、校验和相册
-
-```sh
-yike jobs list
-yike jobs cancel JOB_ID
-yike jobs resume JOB_ID
-yike verify JOB_ID
-yike albums list
-yike albums create 'Originals'
-```
-
-Ctrl-C 保存进度；取消只停止传输。显式 `verify` 仅重新读取已经上传的原件，不启动待上传项。一个账号只允许一个传输进程；precreate 或最终提交结果不确定时保留意图、先做完整身份核对，不能盲目重试制造重复对象。
-
-相册允许重名，以稳定 ID 定位。相册创建响应不明时，人工核对后可用 `albums bind --title 'Originals' --id ALBUM_ID` 绑定。工具不删除云端对象或本地原片，不做镜像删除同步。
-
-## 检索和原件下载
-
-```sh
-yike files search 'camera' --kind video
-yike files list --album ALBUM_ID
-yike files info FILE_ID
-yike download plan --id FILE_ID --to '/chosen/output'
-yike download run PLAN_ID
-```
-
-下载也可显式选择 `--album ALBUM_ID` 或 `--query TEXT`。日期筛选 `--after/--before YYYY-MM-DD` 指云端创建日期 UTC，不等同于相机拍摄日期。
-
-使用原件接口，校验 Range、ETag、完整大小和 MD5；`.part` 与成品同目录，验证后无覆盖原子发布。重名按稳定 ID 区分。独立下载记录计算得到的 SHA-256；只有具备原始源计划的读回，才证明与那份本地原片相同。目标文件系统需要支持硬链接。
-
-## 输出与后台运行
-
-`--json` 输出紧凑 JSON；默认输出格式化 JSON。进度和脱敏错误写 stderr。退出码：`0` 完成，`2` 输入/鉴权/协议错误，`3` 部分完成，`130` 中断。
-
-可选 POSIX/WSL 启动器把计划和上传串起来，状态保存在 `STATE_DIR/runs/RUN_ID`。同一 run-id 的配置不可变，子进程继承运行锁，SSH 断开后仍可配合进程管理器运行。Rust CLI 本身不依赖 Python；Windows 原生直接使用 upload/jobs 命令。
-
-```sh
-python3 scripts/run-backup.py --cli /absolute/path/yike --state-dir /native/private/yike \
-  --root /media/originals --album 'Journey·Originals·{date}' --expect-files 12
-yike completions zsh > _yike
-```
-
-后台启动器也接受 `--attempt-upload-limit BYTES`，随 run 配置保存并仅传给新计划；改变上限需要新的 run-id。可用 `--require-verified-job JOB_ID` 要求前一个样本任务全部强校验完成后才开始上传。
-
-开发和测试见 [贡献指南](CONTRIBUTING.md)，协议边界见 [协议记录](docs/protocol.md)。许可证：MIT。
+Part of [OpenMedia-Lab](https://github.com/OpenMedia-Lab). Own implementation: [MIT](LICENSE).
