@@ -93,6 +93,9 @@ pub struct UploadPlan {
     pub root: PathBuf,
     pub created_at: String,
     pub upload_limit: u64,
+    /// An explicitly requested attempt ceiling, not a claim of server acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_upload_limit: Option<u64>,
     pub files: Vec<PlannedFile>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,4 +168,42 @@ pub struct DownloadProgress {
     pub state: ItemState,
     pub sha256: Option<String>,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn legacy_upload_plan() -> serde_json::Value {
+        json!({
+            "schema": "yike-upload-plan/v1",
+            "id": "anonymous-plan",
+            "account": "a".repeat(64),
+            "root": "/anonymous/source",
+            "created_at": "2000-01-02T00:00:00Z",
+            "upload_limit": 5368709120_u64,
+            "files": []
+        })
+    }
+
+    #[test]
+    fn explicit_large_upload_attempt_is_preserved_in_immutable_plan() {
+        let mut input = legacy_upload_plan();
+        input["upload_limit"] = json!(6442450944_u64);
+        input["attempt_upload_limit"] = json!(6442450944_u64);
+        let plan: UploadPlan = serde_json::from_value(input.clone()).unwrap();
+
+        let persisted = serde_json::to_value(plan).unwrap();
+        assert_eq!(persisted["attempt_upload_limit"], json!(6442450944_u64));
+        assert_eq!(persisted, input);
+    }
+
+    #[test]
+    fn legacy_upload_plan_keeps_its_original_serialized_policy() {
+        let input = legacy_upload_plan();
+        let plan: UploadPlan = serde_json::from_value(input.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(plan).unwrap(), input);
+    }
 }

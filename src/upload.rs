@@ -413,6 +413,11 @@ async fn run_inner<A: TransferApi>(
         api.account() == plan.account,
         "plan belongs to another account"
     );
+    ensure!(
+        plan.attempt_upload_limit
+            .is_none_or(|limit| limit == plan.upload_limit),
+        "explicit upload attempt ceiling differs from the immutable plan"
+    );
     let _lock = store.lock_account(&plan.account)?;
     pin_plan(store, "upload_plans", &plan.id, plan)?;
     let mut seen = HashSet::new();
@@ -423,7 +428,9 @@ async fn run_inner<A: TransferApi>(
     let record = job(store, "upload", &plan.id, &plan.account, resume)?;
     // Unknown account limits are a hard block, never an assumed entitlement.
     let capabilities = retry(store, &record.id, &token, || api.capabilities()).await?;
-    let limit = capabilities.upload_limit.map(|v| v.min(WEB_UPLOAD_LIMIT));
+    let limit = crate::planner::effective_upload_limit(&capabilities, plan.attempt_upload_limit)
+        .ok()
+        .map(|limit| limit.min(plan.upload_limit));
     for (file_index, file) in plan.files.iter().enumerate() {
         let started = std::time::Instant::now();
         eprintln!(
@@ -1102,6 +1109,7 @@ pub(crate) mod fixtures {
         pub creates: Cell<usize>,
         pub precreate_calls: Cell<usize>,
         pub precreate_ambiguous: Cell<bool>,
+        pub precreate_rejected: Cell<bool>,
         pub precreate_instant: Cell<bool>,
         pub precreate_instant_visible: Cell<bool>,
         pub precreate_cancel: RefCell<Option<CancellationToken>>,
@@ -1136,6 +1144,7 @@ pub(crate) mod fixtures {
                 creates: Cell::new(0),
                 precreate_calls: Cell::new(0),
                 precreate_ambiguous: Cell::new(false),
+                precreate_rejected: Cell::new(false),
                 precreate_instant: Cell::new(false),
                 precreate_instant_visible: Cell::new(true),
                 precreate_cancel: RefCell::new(None),
@@ -1205,6 +1214,16 @@ pub(crate) mod fixtures {
                 self.precreate_intent_seen.set(
                     claim.is_some_and(|claim| claim.progress.state == ItemState::CommitIntent),
                 );
+            }
+            if self.precreate_rejected.get() {
+                return Err(api::ApiError {
+                    kind: api::ApiErrorKind::Rejected,
+                    status: Some(200),
+                    errno: Some(413),
+                    retry_after: None,
+                    operation: "precreate",
+                }
+                .into());
             }
             let cancel = self.precreate_cancel.borrow_mut().take();
             if let Some(cancel) = cancel {
@@ -1304,6 +1323,7 @@ pub(crate) mod fixtures {
             root: file.path.parent().unwrap().into(),
             created_at: "fixture".into(),
             upload_limit: WEB_UPLOAD_LIMIT,
+            attempt_upload_limit: None,
             files: vec![file],
         }
     }
@@ -1774,5 +1794,237 @@ mod precreate_checkpoint_tests {
             first, "uploading",
             "a confirmed session ticket must not leave a durable commit-intent intermediate state"
         );
+    }
+}
+
+#[cfg(test)]
+mod attempt_upload_limit_tests {
+    use super::fixtures::*;
+    use super::*;
+
+    fn opted_in(file: PlannedFile, limit: u64) -> UploadPlan {
+        let mut plan = plan(file);
+        plan.upload_limit = limit;
+        plan.attempt_upload_limit = Some(limit);
+        plan
+    }
+
+    #[tokio::test]
+    async fn opted_in_original_exceeding_declared_limit_uploads_and_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let original_plan = plan(source(dir.path(), bytes));
+        let mut encoded = serde_json::to_value(original_plan).unwrap();
+        encoded["attempt_upload_limit"] = serde_json::json!(bytes.len() as u64);
+        encoded["upload_limit"] = serde_json::json!(bytes.len() as u64);
+        let plan: UploadPlan = serde_json::from_value(encoded).unwrap();
+        let mut api = Fake::new(&plan.files[0], bytes);
+        api.caps.upload_limit = Some(5);
+        api.caps.unlimited = Some(true);
+
+        let result = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+
+        assert_eq!(result.verified, 1);
+        assert_eq!(result.blocked, 0);
+        assert!(result.complete);
+        assert_eq!(api.precreate_calls.get(), 1);
+        assert_eq!(api.creates.get(), 1);
+        assert_eq!(api.reads.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_does_not_opt_in_when_account_is_unlimited() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let plan = plan(source(dir.path(), bytes));
+        let mut api = Fake::new(&plan.files[0], bytes);
+        api.caps.upload_limit = Some(5);
+        let result = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(result.blocked, 1);
+        assert_eq!(api.precreate_calls.get(), 0);
+        assert_eq!(api.creates.get(), 0);
+        assert!(api.reads.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn opt_in_rechecks_known_capability_and_unlimited_entitlement_before_submission() {
+        for (reported, unlimited) in [
+            (Some(5), Some(false)),
+            (Some(5), None),
+            (None, Some(true)),
+            (Some(0), Some(true)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("state/db")).unwrap();
+            let bytes = b"anonymous-original";
+            let plan = opted_in(source(dir.path(), bytes), bytes.len() as u64);
+            let mut api = Fake::new(&plan.files[0], bytes);
+            api.caps.upload_limit = reported;
+            api.caps.unlimited = unlimited;
+            let result = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+                .await
+                .unwrap();
+            assert_eq!(result.blocked, 1, "{reported:?} / {unlimited:?}");
+            assert_eq!(api.precreate_calls.get(), 0);
+            assert_eq!(api.creates.get(), 0);
+            assert!(api.part_calls.borrow().is_empty());
+            assert!(api.reads.borrow().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_attempt_must_match_the_immutable_plan_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let mut plan = opted_in(source(dir.path(), bytes), bytes.len() as u64);
+        plan.upload_limit += 1;
+        let api = Fake::new(&plan.files[0], bytes);
+        assert!(
+            run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+                .await
+                .is_err()
+        );
+        assert!(store.list::<JobRecord>("jobs").unwrap().is_empty());
+        assert!(store.list::<UploadPlan>("upload_plans").unwrap().is_empty());
+        assert_eq!(api.precreate_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_attempt_does_not_allow_sources_beyond_its_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let plan = opted_in(source(dir.path(), bytes), 5);
+        let api = Fake::new(&plan.files[0], bytes);
+        let result = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(result.blocked, 1);
+        assert_eq!(api.precreate_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn opted_in_interrupted_parts_resume_without_resending_confirmed_parts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = vec![17; PART_SIZE + 11];
+        let plan = opted_in(source(dir.path(), &bytes), bytes.len() as u64);
+        let mut api = Fake::new(&plan.files[0], &bytes);
+        api.caps.upload_limit = Some(5);
+        let token = CancellationToken::new();
+        *api.cancel_after_part.borrow_mut() = Some(token.clone());
+        let first = run_inner(&store, &api, &plan, None, token, true)
+            .await
+            .unwrap();
+        assert!(!first.complete);
+        assert_eq!(*api.part_calls.borrow(), vec![0]);
+        assert_eq!(api.creates.get(), 0);
+        let resumed = run_inner(
+            &store,
+            &api,
+            &plan,
+            Some(&first.job_id),
+            CancellationToken::new(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.complete);
+        assert_eq!(*api.part_calls.borrow(), vec![0, 1]);
+        assert_eq!(api.creates.get(), 1);
+        assert_eq!(api.reads.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn entitlement_downgrade_preserves_uncertain_intent_until_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let plan = opted_in(source(dir.path(), bytes), bytes.len() as u64);
+        let mut api = Fake::new(&plan.files[0], bytes);
+        api.caps.upload_limit = Some(5);
+        api.precreate_ambiguous.set(true);
+        let first = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(first.needs_reconciliation, 1);
+        api.caps.unlimited = Some(false);
+        let blocked = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(blocked.blocked, 1);
+        let claim = store
+            .get::<Claim>("transfer_claims", &key(&plan.files[0], &plan.account))
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.progress.state, ItemState::NeedsReconciliation);
+        assert_eq!(api.precreate_calls.get(), 1);
+        api.caps.unlimited = Some(true);
+        api.visible.set(true);
+        let resumed = run_inner(
+            &store,
+            &api,
+            &plan,
+            Some(&blocked.job_id),
+            CancellationToken::new(),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(resumed.complete);
+        assert_eq!(api.precreate_calls.get(), 1);
+        assert_eq!(api.creates.get(), 0);
+        assert_eq!(api.reads.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn server_rejection_stops_attempt_without_retry_or_final_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let plan = opted_in(source(dir.path(), bytes), bytes.len() as u64);
+        let mut api = Fake::new(&plan.files[0], bytes);
+        api.caps.upload_limit = Some(5);
+        api.precreate_rejected.set(true);
+        let result = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert!(!result.complete);
+        assert_eq!(result.needs_reconciliation, 1);
+        let next = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(next.needs_reconciliation, 1);
+        assert_eq!(api.precreate_calls.get(), 1);
+        assert_eq!(api.creates.get(), 0);
+        assert!(api.part_calls.borrow().is_empty());
+        assert!(api.reads.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn opt_in_never_relaxes_original_sha256_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("state/db")).unwrap();
+        let bytes = b"anonymous-original";
+        let plan = opted_in(source(dir.path(), bytes), bytes.len() as u64);
+        let mut incorrect = bytes.to_vec();
+        incorrect[0] ^= 1;
+        let mut api = Fake::new(&plan.files[0], &incorrect);
+        api.caps.upload_limit = Some(5);
+        let result = run_inner(&store, &api, &plan, None, CancellationToken::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(result.uploaded, 1);
+        assert_eq!(result.verified, 0);
+        assert!(!result.complete);
+        assert_eq!(api.creates.get(), 1);
+        assert!(!api.reads.borrow().is_empty());
     }
 }

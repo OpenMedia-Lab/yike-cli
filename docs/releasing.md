@@ -16,7 +16,7 @@ Both branch/PR CI and the release workflow use the same reusable workflow and Ru
 
 These explicit labels and architectures are listed in [GitHub's hosted runner reference](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). The [Windows image](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md) includes Visual Studio C++ tools and a Windows SDK. Its job locates the x64 MSVC linker before compiling and testing. A Rust toolchain installed on a laptop without `link.exe` cannot substitute for a successful native Windows job.
 
-The current Unix suite contains 84 Rust tests. Platform-specific tests are selected by Rust's `cfg` attributes, so counts can differ by operating system. Tests use synthetic data and loopback fixtures; CI receives no production API credentials. This verifies local program behavior and packaging. It does not establish live service compatibility, sign the executables or notarize the macOS builds. Linux binaries require a compatible GNU/Linux userspace, including when used under WSL; they are not static universal Linux executables.
+The current Unix suite contains 102 Rust tests. Platform-specific tests are selected by Rust's `cfg` attributes, so counts can differ by operating system. Tests use synthetic data and loopback fixtures; CI receives no production API credentials. This verifies local program behavior and packaging. It does not establish live service compatibility, sign the executables or notarize the macOS builds. Linux binaries require a compatible GNU/Linux userspace, including when used under WSL; they are not static universal Linux executables.
 
 ## Prepare and trigger
 

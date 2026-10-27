@@ -128,6 +128,9 @@ enum UploadCommand {
         max_files: Option<usize>,
         #[arg(long)]
         expect_files: Option<usize>,
+        /// Explicit attempt ceiling in bytes for an unlimited account; service acceptance is unproven
+        #[arg(long, value_name = "BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        attempt_upload_limit: Option<u64>,
     },
     Run {
         plan: String,
@@ -381,15 +384,24 @@ async fn execute(cli: Cli) -> Result<i32> {
                     album,
                     max_files,
                     expect_files,
+                    attempt_upload_limit,
                 } => {
                     ensure!(max_files != Some(0), "max-files must be positive");
                     if let Some(n) = expect_files {
                         inventory(&root, n)?;
                     }
-                    let p = planner::build(&store, &api, &root, &album, max_files, cancel.clone())
-                        .await?;
+                    let p = planner::build_with_attempt_limit(
+                        &store,
+                        &api,
+                        &root,
+                        &album,
+                        max_files,
+                        cancel.clone(),
+                        attempt_upload_limit,
+                    )
+                    .await?;
                     let blocked:Vec<_>=p.files.iter().filter(|f|f.blocked.is_some()).map(|f|json!({"source":f.relative_path,"bytes":f.stamp.len,"reason":f.blocked})).collect();
-                    json!({"plan_id":p.id,"total":p.files.len(),"eligible":p.files.len()-blocked.len(),"bytes":p.files.iter().map(|f|f.stamp.len).sum::<u64>(),"upload_limit":p.upload_limit,"blocked":blocked,"cloud_writes":false})
+                    json!({"plan_id":p.id,"total":p.files.len(),"eligible":p.files.len()-blocked.len(),"bytes":p.files.iter().map(|f|f.stamp.len).sum::<u64>(),"upload_limit":p.upload_limit,"attempt_upload_limit":p.attempt_upload_limit,"blocked":blocked,"cloud_writes":false})
                 }
                 UploadCommand::Run { plan } => {
                     let p = store
@@ -563,6 +575,41 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn upload_plan_accepts_an_explicit_large_file_attempt_ceiling() {
+        assert!(
+            Cli::try_parse_from([
+                "yike",
+                "upload",
+                "plan",
+                "/fixtures/originals",
+                "--album",
+                "Originals",
+                "--attempt-upload-limit",
+                "6442450944"
+            ])
+            .is_ok()
+        );
+    }
+    #[test]
+    fn upload_attempt_ceiling_rejects_zero_negative_and_overflow() {
+        for value in ["0", "-1", "18446744073709551616", "5GiB"] {
+            assert!(
+                Cli::try_parse_from([
+                    "yike",
+                    "upload",
+                    "plan",
+                    "/fixtures/originals",
+                    "--album",
+                    "Originals",
+                    "--attempt-upload-limit",
+                    value,
+                ])
+                .is_err(),
+                "accepted {value}"
+            );
+        }
+    }
     #[test]
     fn doctor_probes_writability_without_leaving_files() {
         let directory = tempfile::tempdir().unwrap();

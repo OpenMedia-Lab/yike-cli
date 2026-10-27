@@ -41,28 +41,62 @@ pub async fn build(
     file_limit: Option<usize>,
     cancel: CancellationToken,
 ) -> Result<UploadPlan> {
+    build_with_attempt_limit(store, api, root, album_template, file_limit, cancel, None).await
+}
+
+pub async fn build_with_attempt_limit(
+    store: &Store,
+    api: &Api,
+    root: &Path,
+    album_template: &str,
+    file_limit: Option<usize>,
+    cancel: CancellationToken,
+    attempt_upload_limit: Option<u64>,
+) -> Result<UploadPlan> {
     ensure!(!cancel.is_cancelled(), "planning cancelled");
-    let upload_limit = effective_upload_limit(&api.capabilities().await?)?;
-    build_at_limit(
+    let upload_limit = effective_upload_limit(&api.capabilities().await?, attempt_upload_limit)?;
+    build_at_policy(
         store,
         &api.account(),
         root,
         album_template,
         file_limit,
         cancel,
-        upload_limit,
+        UploadPolicy {
+            upload_limit,
+            attempt_upload_limit,
+        },
     )
     .await
 }
 
-fn effective_upload_limit(capabilities: &Capabilities) -> Result<u64> {
+pub(crate) fn effective_upload_limit(
+    capabilities: &Capabilities,
+    attempt_upload_limit: Option<u64>,
+) -> Result<u64> {
     let actual = capabilities
         .upload_limit
         .context("actual account upload limit is unknown; cannot create a safe plan")?;
     ensure!(actual > 0, "account reports no supported upload size");
-    Ok(actual.min(WEB_UPLOAD_LIMIT))
+    match attempt_upload_limit {
+        Some(limit) => {
+            ensure!(limit > 0, "explicit upload attempt limit must be positive");
+            ensure!(
+                capabilities.unlimited == Some(true),
+                "explicit upload attempts require confirmed unlimited storage"
+            );
+            Ok(limit)
+        }
+        None => Ok(actual.min(WEB_UPLOAD_LIMIT)),
+    }
 }
 
+struct UploadPolicy {
+    upload_limit: u64,
+    attempt_upload_limit: Option<u64>,
+}
+
+#[cfg(test)]
 async fn build_at_limit(
     store: &Store,
     account: &str,
@@ -72,13 +106,45 @@ async fn build_at_limit(
     cancel: CancellationToken,
     upload_limit: u64,
 ) -> Result<UploadPlan> {
+    build_at_policy(
+        store,
+        account,
+        root,
+        album_template,
+        file_limit,
+        cancel,
+        UploadPolicy {
+            upload_limit,
+            attempt_upload_limit: None,
+        },
+    )
+    .await
+}
+
+async fn build_at_policy(
+    store: &Store,
+    account: &str,
+    root: &Path,
+    album_template: &str,
+    file_limit: Option<usize>,
+    cancel: CancellationToken,
+    policy: UploadPolicy,
+) -> Result<UploadPlan> {
+    let UploadPolicy {
+        upload_limit,
+        attempt_upload_limit,
+    } = policy;
     ensure!(!cancel.is_cancelled(), "planning cancelled");
     ensure!(
         account.len() == 64 && account.bytes().all(|b| b.is_ascii_hexdigit()),
         "invalid account fingerprint"
     );
     ensure!(
-        upload_limit > 0 && upload_limit <= WEB_UPLOAD_LIMIT,
+        upload_limit > 0
+            && match attempt_upload_limit {
+                Some(limit) => limit == upload_limit,
+                None => upload_limit <= WEB_UPLOAD_LIMIT,
+            },
         "unsupported upload limit"
     );
     ensure!(
@@ -129,8 +195,13 @@ async fn build_at_limit(
         );
         let key = cache_key(account, &source.path, &source.stamp)?;
         let blocked = if source.stamp.len > upload_limit {
+            let limit_kind = if attempt_upload_limit.is_some() {
+                "explicit upload attempt"
+            } else {
+                "validated account web upload"
+            };
             Some(format!(
-                "size {} exceeds validated account web upload limit {upload_limit}; original preserved",
+                "size {} exceeds {limit_kind} limit {upload_limit}; original preserved",
                 source.stamp.len
             ))
         } else if source.stamp.len == 0 {
@@ -200,6 +271,7 @@ async fn build_at_limit(
         root,
         created_at: Utc::now().to_rfc3339(),
         upload_limit,
+        attempt_upload_limit,
         files,
     };
     store.insert("upload_plans", &plan.id, &plan)?;
@@ -347,13 +419,142 @@ mod tests {
             download_limit: None,
             unlimited: Some(true),
         };
-        assert!(effective_upload_limit(&cap(None)).is_err());
-        assert!(effective_upload_limit(&cap(Some(0))).is_err());
-        assert_eq!(effective_upload_limit(&cap(Some(23))).unwrap(), 23);
+        assert!(effective_upload_limit(&cap(None), None).is_err());
+        assert!(effective_upload_limit(&cap(Some(0)), None).is_err());
+        assert_eq!(effective_upload_limit(&cap(Some(23)), None).unwrap(), 23);
         assert_eq!(
-            effective_upload_limit(&cap(Some(WEB_UPLOAD_LIMIT * 2))).unwrap(),
+            effective_upload_limit(&cap(Some(WEB_UPLOAD_LIMIT * 2)), None).unwrap(),
             WEB_UPLOAD_LIMIT
         );
+    }
+
+    #[test]
+    fn unlimited_storage_does_not_implicitly_raise_the_default_upload_limit() {
+        for unlimited in [None, Some(false), Some(true)] {
+            let capabilities = Capabilities {
+                upload_limit: Some(10737418240),
+                download_limit: Some(10737418240),
+                unlimited,
+            };
+            assert_eq!(
+                effective_upload_limit(&capabilities, None).unwrap(),
+                5368709120
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_attempt_requires_known_positive_capability_and_unlimited_storage() {
+        for (upload_limit, unlimited, attempt) in [
+            (None, Some(true), 6442450944),
+            (Some(0), Some(true), 6442450944),
+            (Some(5368709120), None, 6442450944),
+            (Some(5368709120), Some(false), 6442450944),
+            (Some(5368709120), Some(true), 0),
+        ] {
+            let capabilities = Capabilities {
+                upload_limit,
+                download_limit: Some(10737418240),
+                unlimited,
+            };
+            assert!(effective_upload_limit(&capabilities, Some(attempt)).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_attempt_uses_exact_requested_ceiling_without_inventing_entitlement() {
+        let capabilities = Capabilities {
+            upload_limit: Some(5368709120),
+            download_limit: Some(10737418240),
+            unlimited: Some(true),
+        };
+        assert_eq!(
+            effective_upload_limit(&capabilities, Some(6442450944)).unwrap(),
+            6442450944
+        );
+        assert_eq!(effective_upload_limit(&capabilities, Some(23)).unwrap(), 23);
+    }
+
+    #[tokio::test]
+    async fn explicit_attempt_hashes_eligible_candidates_without_rewriting_the_old_plan() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("video");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("small.mp4"), b"abc").unwrap();
+        fs::write(root.join("candidate.mp4"), b"abcd").unwrap();
+        fs::write(root.join("oversize.mp4"), b"abcdefg").unwrap();
+        fs::write(root.join("empty.mp4"), []).unwrap();
+        let store = Store::open(&dir.path().join("private/state.sqlite3")).unwrap();
+        let original = build_at_limit(
+            &store,
+            &account(),
+            &root,
+            "Fixture",
+            None,
+            CancellationToken::new(),
+            3,
+        )
+        .await
+        .unwrap();
+        let original_json = serde_json::to_value(&original).unwrap();
+        let capabilities = Capabilities {
+            upload_limit: Some(3),
+            download_limit: Some(10),
+            unlimited: Some(true),
+        };
+        let upload_limit = effective_upload_limit(&capabilities, Some(6)).unwrap();
+        let attempted = build_at_policy(
+            &store,
+            &account(),
+            &root,
+            "Fixture",
+            None,
+            CancellationToken::new(),
+            UploadPolicy {
+                upload_limit,
+                attempt_upload_limit: Some(6),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(attempted.files.len(), 4);
+        assert_eq!(attempted.upload_limit, 6);
+        assert_eq!(attempted.attempt_upload_limit, Some(6));
+        let candidate = attempted
+            .files
+            .iter()
+            .find(|file| file.name() == "candidate.mp4")
+            .unwrap();
+        assert!(candidate.blocked.is_none());
+        assert_eq!(candidate.md5, "e2fc714c4727ee9395f324cd2e7f331f");
+        assert_eq!(candidate.parts.len(), 1);
+        assert_eq!(candidate.parts[0].len, 4);
+        assert_eq!(
+            attempted
+                .files
+                .iter()
+                .filter(|f| f.blocked.is_some())
+                .count(),
+            2
+        );
+        for file in attempted.files.iter().filter(|f| f.blocked.is_some()) {
+            assert!(file.parts.is_empty());
+            assert!(file.sha256.is_empty());
+        }
+        let saved = store
+            .get::<UploadPlan>("upload_plans", &attempted.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.attempt_upload_limit, Some(6));
+        assert_eq!(saved.upload_limit, 6);
+        let unchanged = store
+            .get::<UploadPlan>("upload_plans", &original.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(unchanged).unwrap(), original_json);
+        assert_eq!(fs::read(root.join("candidate.mp4")).unwrap(), b"abcd");
+        assert_eq!(fs::read(root.join("oversize.mp4")).unwrap(), b"abcdefg");
     }
 
     #[tokio::test]
@@ -397,6 +598,37 @@ mod tests {
             store.list::<serde_json::Value>("hash_cache").unwrap().len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_plan_can_persist_a_ceiling_above_the_default_web_limit() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("fixture.mp4");
+        fs::write(&path, b"abc").unwrap();
+        let store = Store::open(&dir.path().join("private/state.sqlite3")).unwrap();
+        let plan = build_at_policy(
+            &store,
+            &account(),
+            &path,
+            "Fixture",
+            None,
+            CancellationToken::new(),
+            UploadPolicy {
+                upload_limit: 6442450944,
+                attempt_upload_limit: Some(6442450944),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(plan.files.len(), 1);
+        assert!(plan.files[0].blocked.is_none());
+        let saved = store
+            .get::<UploadPlan>("upload_plans", &plan.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.upload_limit, 6442450944);
+        assert_eq!(saved.attempt_upload_limit, Some(6442450944));
     }
 
     #[tokio::test]
